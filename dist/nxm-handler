@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# This is an example of a really standard handler.
+# Tell proton-handler which exe to look for, pass it the rest of the args,
+# and (optionally) log the output somewhere for debugging.
+proton-handler ModOrganizer.exe $@ > /tmp/proton-handler.log 2>&1

@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Unverum expects the "-download" parameter before the unverum:// link
+proton-handler Unverum.exe -download $@ > /tmp/proton-handler.log 2>&1
