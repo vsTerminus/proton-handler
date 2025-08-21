@@ -199,12 +199,18 @@ internal static class ProtonHandler
         logger.LogInformation($"Dotnet: {dotnetRoot}\nSteamDir: {steamDir}\nPrefix: {prefixDir}\nProton: {proton}\nApp: {app}\nArgs: {appArgs}\nLink: {handlerArgsString}");
         logger.LogInformation(
             $"DOTNET_ROOT={dotnetRoot} STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{steamDir}\" STEAM_COMPAT_DATA_PATH=\"{prefixDir}\" \"{proton}\" run \"{app}\" \"{appArgs}\" \"{handlerArgsString}\"");
-                
+
+        // Solves the issue of appArgs being null while command is being generated and causing errors.
+        var appWithArgs = app;
+        if (appArgs != null && appArgs.Length > 0)
+        {
+            appWithArgs += $" {appArgs}";
+        }
+
         var result = await Cli.Wrap(proton)
             .WithArguments(env => env
                 .Add("run")
-                .Add(app)
-                .Add(appArgs)
+                .Add(appWithArgs)
                 .Add(handlerArgsArray))
             .WithEnvironmentVariables(env => env
                 .Set("DOTNET_ROOT", dotnetRoot)
