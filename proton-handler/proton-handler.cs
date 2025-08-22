@@ -17,6 +17,8 @@ internal static class ProtonHandler
     private const string DotnetRootPattern = "DOTNET_ROOT=(.*)$";
     private const string AppExePattern = "EXE=(.*)$";
     private const string TR = "/usr/bin/tr";
+    private const string ProtonVerb = "run";
+    private const string ProtonIdentifier = "srt-bwrap";
     
     private static string FirstCaptureGroup(Regex r, StringBuilder s)
     {
@@ -32,11 +34,11 @@ internal static class ProtonHandler
         return "";
     }
     
-    private static StringBuilder Environ(Process process)
+    private static async Task<StringBuilder> Environ(Process process)
     {
         var stdOutBuffer = new StringBuilder();
-        using var input = File.OpenRead("/proc/" + process.Id + "/environ");
-        Cli.Wrap(TR)
+        await using var input = File.OpenRead("/proc/" + process.Id + "/environ");
+        await Cli.Wrap(TR)
             .WithArguments(env => env
                 .Add("'\\0'")
                 .Add("'\n'"))
@@ -48,11 +50,12 @@ internal static class ProtonHandler
         return stdOutBuffer;
     }
     
-    private static StringBuilder CmdLine(Process process)
+    private static async Task<StringBuilder> CmdLine(Process process)
     {
         var stdOutBuffer = new StringBuilder();
-        using var input = File.OpenRead("/proc/" + process.Id + "/cmdline");
-        Cli.Wrap(TR)
+        var filePath = "/proc/" + process.Id + "/cmdline";
+        await using var input = File.OpenRead(filePath);
+        await Cli.Wrap(TR)
             .WithArguments(env => env
                 .Add("'\\0'")
                 .Add("' '"))
@@ -60,9 +63,9 @@ internal static class ProtonHandler
             .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
             .WithValidation(CommandResultValidation.None)
             .ExecuteAsync();
-        
         return stdOutBuffer;
     }
+
     private static string SteamCompatInstallPath(StringBuilder environ)
     {
         return FirstCaptureGroup(new Regex(SteamCompatInstallPathPattern), environ);
@@ -123,9 +126,8 @@ internal static class ProtonHandler
         var handlerArgsString = string.Join(' ', handlerArgsArray).Trim();
         
         logger.LogInformation("Searching for '{app}'", appExe);
-        const string processIdentifier = "srt-bwrap";
-        var processes = Process.GetProcessesByName(processIdentifier);
-        logger.LogInformation("Found {numberOf} processes matching {identifier}", processes.Length, processIdentifier);
+        var processes = Process.GetProcessesByName(ProtonIdentifier);
+        logger.LogInformation("Found {numberOf} processes matching {identifier}", processes.Length, ProtonIdentifier);
         
         /*
         // Uncomment if you need a list of all processes to figure out how C# is identifying things.
@@ -142,11 +144,11 @@ internal static class ProtonHandler
 
         foreach (var process in processes)
         {
+            var environ = await Environ(process);
+            var cmdline = await CmdLine(process);
+
             logger.LogInformation("Process Name: {name}, PID: {id}", process.ProcessName, process.Id);
 
-            var environ = Environ(process);
-            var cmdline = CmdLine(process);
-            
             var match = appRegex.Match(cmdline.ToString());
             if (!match.Success) continue;
             {
@@ -200,24 +202,33 @@ internal static class ProtonHandler
         logger.LogInformation(
             $"DOTNET_ROOT={dotnetRoot} STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{steamDir}\" STEAM_COMPAT_DATA_PATH=\"{prefixDir}\" \"{proton}\" run \"{app}\" \"{appArgs}\" \"{handlerArgsString}\"");
 
-        // Solves the issue of appArgs being null while command is being generated and causing errors.
-        var appWithArgs = app;
+        // There has to be a better way to do this.
+        // Maybe I can override the Add method.
+        Command handler;
         if (appArgs != null && appArgs.Length > 0)
         {
-            appWithArgs += $" {appArgs}";
+            handler = Cli.Wrap(proton)
+                .WithArguments(a => a
+                    .Add(ProtonVerb)
+                    .Add(app)
+                    .Add(appArgs)
+                    .Add(handlerArgsArray));
+        }
+        else
+        {
+            handler = Cli.Wrap(proton)
+                .WithArguments(a => a
+                    .Add(ProtonVerb)
+                    .Add(app)
+                    .Add(handlerArgsArray));
         }
 
-        var result = await Cli.Wrap(proton)
-            .WithArguments(env => env
-                .Add("run")
-                .Add(appWithArgs)
-                .Add(handlerArgsArray))
-            .WithEnvironmentVariables(env => env
+        var result = await handler
+            .WithEnvironmentVariables(e => e
                 .Set("DOTNET_ROOT", dotnetRoot)
                 .Set("STEAM_COMPAT_CLIENT_INSTALL_PATH", steamDir)
                 .Set("STEAM_COMPAT_DATA_PATH", prefixDir))
             .ExecuteAsync();
-
-        logger.LogInformation($"Exit Code: {result.ExitCode}");
+        logger.LogInformation("Exit Code: {code}", result.ExitCode);
     }
 }
