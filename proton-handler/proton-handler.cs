@@ -12,13 +12,16 @@ namespace proton_handler;
 internal static class ProtonHandler
 {
     private const string ProtonPathPattern = "PROTONPATH=(.*)$";
+    private const string ReaperProtonPathPattern = "-- (.*/proton) ";
     private const string SteamCompatInstallPathPattern = "STEAM_COMPAT_INSTALL_PATH=(.*)$";
     private const string SteamCompatDataPathPattern = "STEAM_COMPAT_DATA_PATH=(.*)$";
     private const string DotnetRootPattern = "DOTNET_ROOT=(.*)$";
     private const string AppExePattern = "EXE=(.*)$";
+    private const string ReaperAppExePattern = "proton (waitforexitand)?run (.*\\.exe)";
     private const string TR = "/usr/bin/tr";
     private const string ProtonVerb = "run";
-    private const string ProtonIdentifier = "srt-bwrap";
+    private const string BwrapIdentifier = "srt-bwrap"; // Used by official Valve Proton versions
+    private const string ReaperIdentifier = "reaper"; // Used by proton tkg
     
     private static string FirstCaptureGroup(Regex r, StringBuilder s)
     {
@@ -33,7 +36,21 @@ internal static class ProtonHandler
 
         return "";
     }
-    
+
+    private static string SecondCaptureGroup(Regex r, StringBuilder s)
+    {
+        foreach (var line in s.ToString().Split('\n'))
+        {
+            var m = r.Match(line);
+            if (!m.Success) continue;
+            {
+                return m.Groups[2].Captures[0].ToString();
+            }
+        }
+
+        return "";
+    }
+
     private static async Task<StringBuilder> Environ(Process process)
     {
         var stdOutBuffer = new StringBuilder();
@@ -82,6 +99,11 @@ internal static class ProtonHandler
         return protonPath != "" ? protonPath + "/proton" : "";
     }
 
+    private static string ReaperProtonPath(StringBuilder cmdline)
+    {
+        return FirstCaptureGroup(new Regex(ReaperProtonPathPattern), cmdline);
+    }
+
     private static string DotnetRoot(StringBuilder environ)
     {
         return FirstCaptureGroup(new Regex(DotnetRootPattern), environ);
@@ -90,6 +112,11 @@ internal static class ProtonHandler
     private static string AppExe(StringBuilder environ)
     {
         return FirstCaptureGroup(new Regex(AppExePattern), environ);
+    }
+
+    private static string ReaperAppExe(StringBuilder cmdline)
+    {
+        return SecondCaptureGroup(new Regex(ReaperAppExePattern), cmdline);
     }
 
     private static string AppArgs(StringBuilder cmdline, string exe)
@@ -126,8 +153,12 @@ internal static class ProtonHandler
         var handlerArgsString = string.Join(' ', handlerArgsArray).Trim();
         
         logger.LogInformation("Searching for '{app}'", appExe);
-        var processes = Process.GetProcessesByName(ProtonIdentifier);
-        logger.LogInformation("Found {numberOf} processes matching {identifier}", processes.Length, ProtonIdentifier);
+        var bwrapProcesses = Process.GetProcessesByName(BwrapIdentifier);
+        var reaperProcesses = Process.GetProcessesByName(ReaperIdentifier);
+        var processes = new Process[bwrapProcesses.Length + reaperProcesses.Length];
+        bwrapProcesses.CopyTo(processes, 0);
+        reaperProcesses.CopyTo(processes, bwrapProcesses.Length);
+        logger.LogInformation("Found {numberOf} processes matching {bwrap} and {reaper}", processes.Length, BwrapIdentifier, ReaperIdentifier);
         
         /*
         // Uncomment if you need a list of all processes to figure out how C# is identifying things.
@@ -153,10 +184,20 @@ internal static class ProtonHandler
             if (!match.Success) continue;
             {
                 logger.LogInformation("Match Found!");
+                if (process.ProcessName == ReaperIdentifier)
+                {
+                    // Proton TKG doesn't populate EXE and PROTONPATH, so we have to use cmdline
+                    app = ReaperAppExe(cmdline);
+                    proton = ReaperProtonPath(cmdline);
+                }
+                else
+                {
+                    // Valve's Proton populates EXE and PROTONPATH, making our life easy
+                    app = AppExe(environ);
+                    proton = ProtonPath(environ);
+                }
 
-                app = AppExe(environ);
                 appArgs = AppArgs(cmdline, app);
-                proton = ProtonPath(environ);
                 steamDir = SteamCompatInstallPath(environ);
                 prefixDir = SteamCompatDataPath(environ);
                 dotnetRoot = DotnetRoot(environ);
