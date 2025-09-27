@@ -11,13 +11,13 @@ namespace proton_handler;
 
 internal static class ProtonHandler
 {
-    private const string ProtonPathPattern = "PROTONPATH=(.*)$";
-    private const string ReaperProtonPathPattern = "-- (.*/proton) ";
+    private const string EnvironProtonPathPattern = "PROTONPATH=(.*)$";
+    private const string CmdlineProtonPathPattern = "-- (.* container-runtime)? (.*/proton) ";
     private const string SteamCompatInstallPathPattern = "STEAM_COMPAT_INSTALL_PATH=(.*)$";
     private const string SteamCompatDataPathPattern = "STEAM_COMPAT_DATA_PATH=(.*)$";
     private const string DotnetRootPattern = "DOTNET_ROOT=(.*)$";
-    private const string AppExePattern = "EXE=(.*)$";
-    private const string ReaperAppExePattern = "proton (waitforexitand)?run (.*\\.exe)";
+    private const string EnvironAppExePattern = "EXE=(.*)$";
+    private const string CmdlineAppExePattern = "proton (waitforexitand)?run (.*\\.exe)";
     private const string TR = "/usr/bin/tr";
     private const string ProtonVerb = "run";
     private const string BwrapIdentifier = "srt-bwrap"; // Used by official Valve Proton versions
@@ -54,16 +54,23 @@ internal static class ProtonHandler
     private static async Task<StringBuilder> Environ(Process process)
     {
         var stdOutBuffer = new StringBuilder();
-        await using var input = File.OpenRead("/proc/" + process.Id + "/environ");
-        await Cli.Wrap(TR)
-            .WithArguments(env => env
-                .Add("'\\0'")
-                .Add("'\n'"))
-            .WithStandardInputPipe(PipeSource.FromStream(input))
-            .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
-            .WithValidation(CommandResultValidation.None)
-            .ExecuteAsync();
-        
+        try
+        {
+            await using var input = File.OpenRead("/proc/" + process.Id + "/environ");
+            await Cli.Wrap(TR)
+                .WithArguments(env => env
+                    .Add("'\\0'")
+                    .Add("'\n'"))
+                .WithStandardInputPipe(PipeSource.FromStream(input))
+                .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
+                .WithValidation(CommandResultValidation.None)
+                .ExecuteAsync();
+        }
+        catch (Exception e)
+        {
+            Console.Write("Skipping PID {0}: {1}", process.Id, e.Message);
+        }
+
         return stdOutBuffer;
     }
     
@@ -71,15 +78,23 @@ internal static class ProtonHandler
     {
         var stdOutBuffer = new StringBuilder();
         var filePath = "/proc/" + process.Id + "/cmdline";
-        await using var input = File.OpenRead(filePath);
-        await Cli.Wrap(TR)
-            .WithArguments(env => env
-                .Add("'\\0'")
-                .Add("' '"))
-            .WithStandardInputPipe(PipeSource.FromStream(input))
-            .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
-            .WithValidation(CommandResultValidation.None)
-            .ExecuteAsync();
+        try
+        {
+            await using var input = File.OpenRead(filePath);
+            await Cli.Wrap(TR)
+                .WithArguments(env => env
+                    .Add("'\\0'")
+                    .Add("' '"))
+                .WithStandardInputPipe(PipeSource.FromStream(input))
+                .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
+                .WithValidation(CommandResultValidation.None)
+                .ExecuteAsync();
+        }
+        catch (Exception e)
+        {
+            Console.Write("Skipping PID {0}: {1}", process.Id, e.Message);
+        }
+
         return stdOutBuffer;
     }
 
@@ -93,15 +108,15 @@ internal static class ProtonHandler
         return FirstCaptureGroup(new Regex(SteamCompatDataPathPattern), environ);
     }
 
-    private static string ProtonPath(StringBuilder environ)
+    private static string ProtonPathFromEnviron(StringBuilder environ)
     {
-        var protonPath = FirstCaptureGroup(new Regex(ProtonPathPattern), environ);
+        var protonPath = FirstCaptureGroup(new Regex(EnvironProtonPathPattern), environ);
         return protonPath != "" ? protonPath + "/proton" : "";
     }
 
-    private static string ReaperProtonPath(StringBuilder cmdline)
+    private static string ProtonPathFromCmdline(StringBuilder cmdline)
     {
-        return FirstCaptureGroup(new Regex(ReaperProtonPathPattern), cmdline);
+        return SecondCaptureGroup(new Regex(CmdlineProtonPathPattern), cmdline);
     }
 
     private static string DotnetRoot(StringBuilder environ)
@@ -109,14 +124,14 @@ internal static class ProtonHandler
         return FirstCaptureGroup(new Regex(DotnetRootPattern), environ);
     }
 
-    private static string AppExe(StringBuilder environ)
+    private static string AppExeFromEnviron(StringBuilder environ)
     {
-        return FirstCaptureGroup(new Regex(AppExePattern), environ);
+        return FirstCaptureGroup(new Regex(EnvironAppExePattern), environ);
     }
 
-    private static string ReaperAppExe(StringBuilder cmdline)
+    private static string AppExeFromCmdline(StringBuilder cmdline)
     {
-        return SecondCaptureGroup(new Regex(ReaperAppExePattern), cmdline);
+        return SecondCaptureGroup(new Regex(CmdlineAppExePattern), cmdline);
     }
 
     private static string AppArgs(StringBuilder cmdline, string exe)
@@ -177,50 +192,49 @@ internal static class ProtonHandler
         {
             var environ = await Environ(process);
             var cmdline = await CmdLine(process);
+            if (environ.Length == 0 || cmdline.Length == 0) continue;
 
             logger.LogInformation("Process Name: {name}, PID: {id}", process.ProcessName, process.Id);
 
             var match = appRegex.Match(cmdline.ToString());
             if (!match.Success) continue;
+
+            logger.LogInformation("Match Found!");
+            
+            // Try using environ EXE and PROTONPATH first.
+            app = AppExeFromEnviron(environ);
+            proton = ProtonPathFromEnviron(environ);
+            
+            // These aren't consistently set and we may have to fall back to cmdline parsing.
+            if (proton.Length == 0 || app.Length == 0)
             {
-                logger.LogInformation("Match Found!");
-                if (process.ProcessName == ReaperIdentifier)
-                {
-                    // Proton TKG doesn't populate EXE and PROTONPATH, so we have to use cmdline
-                    app = ReaperAppExe(cmdline);
-                    proton = ReaperProtonPath(cmdline);
-                }
-                else
-                {
-                    // Valve's Proton populates EXE and PROTONPATH, making our life easy
-                    app = AppExe(environ);
-                    proton = ProtonPath(environ);
-                }
-
-                appArgs = AppArgs(cmdline, app);
-                steamDir = SteamCompatInstallPath(environ);
-                prefixDir = SteamCompatDataPath(environ);
-                dotnetRoot = DotnetRoot(environ);
-
-                if (prefixDir != "")
-                {
-                    logger.LogInformation("Found running process. Writing to config file.");
-                    config[appExe]["APP"] = app;
-                    config[appExe]["ARGS"] = appArgs;
-                    config[appExe]["PROTON"] = proton;
-                    config[appExe]["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = steamDir;
-                    config[appExe]["STEAM_COMPAT_DATA_PATH"] = prefixDir;
-                    config[appExe]["DOTNET_ROOT"] = dotnetRoot;
-                    parser.WriteFile(configFile, config);
-                }
-                else
-                {
-                    logger.LogError("Could not determine Proton's current prefix.");
-                    Exit(1);
-                }
-
-                break;
+                app = AppExeFromCmdline(cmdline);
+                proton = ProtonPathFromCmdline(cmdline);
             }
+
+            appArgs = AppArgs(cmdline, app);
+            steamDir = SteamCompatInstallPath(environ);
+            prefixDir = SteamCompatDataPath(environ);
+            dotnetRoot = DotnetRoot(environ);
+
+            if (prefixDir != "")
+            {
+                logger.LogInformation("Found running process. Writing to config file.");
+                config[appExe]["APP"] = app;
+                config[appExe]["ARGS"] = appArgs;
+                config[appExe]["PROTON"] = proton;
+                config[appExe]["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = steamDir;
+                config[appExe]["STEAM_COMPAT_DATA_PATH"] = prefixDir;
+                config[appExe]["DOTNET_ROOT"] = dotnetRoot;
+                parser.WriteFile(configFile, config);
+            }
+            else
+            {
+                logger.LogError("Could not determine Proton's current prefix.");
+                Exit(1);
+            }
+
+            break;
         }
         
         if (prefixDir == "" && config[appExe]["STEAM_COMPAT_DATA_PATH"] != null)
