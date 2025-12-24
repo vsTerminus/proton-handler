@@ -255,35 +255,31 @@ internal static class ProtonHandler
         
         logger.LogInformation($"Dotnet: {dotnetRoot}\nSteamDir: {steamDir}\nPrefix: {prefixDir}\nProton: {proton}\nApp: {app}\nArgs: {appArgs}\nLink: {handlerArgsString}");
         logger.LogInformation(
-            $"DOTNET_ROOT={dotnetRoot} STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{steamDir}\" STEAM_COMPAT_DATA_PATH=\"{prefixDir}\" \"{proton}\" run \"{app}\" \"{appArgs}\" \"{handlerArgsString}\"");
+            $"DOTNET_ROOT={dotnetRoot} STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{steamDir}\" STEAM_COMPAT_DATA_PATH=\"{prefixDir}\" \"{proton}\" \"{ProtonVerb}\" \"{app}\" \"{appArgs}\" \"{handlerArgsString}\"");
 
-        // There has to be a better way to do this.
-        // Maybe I can override the Add method.
-        Command handler;
-        if (appArgs != null && appArgs.Length > 0)
-        {
-            handler = Cli.Wrap(proton)
-                .WithArguments(a => a
-                    .Add(ProtonVerb)
-                    .Add(app)
-                    .Add(appArgs)
-                    .Add(handlerArgsArray));
-        }
-        else
-        {
-            handler = Cli.Wrap(proton)
-                .WithArguments(a => a
-                    .Add(ProtonVerb)
-                    .Add(app)
-                    .Add(handlerArgsArray));
-        }
+        // Only include appArgs if they exist - otherwise it causes issues.
+        var appArray = (appArgs != null && appArgs.Length > 0) ? new string[] { app, appArgs } : new string[] { app };
 
-        var result = await handler
+        Command handler = Cli.Wrap(proton)
+            .WithArguments(a => a
+                .Add(ProtonVerb)
+                .Add(appArray)
+                .Add(handlerArgsArray))
             .WithEnvironmentVariables(e => e
                 .Set("DOTNET_ROOT", dotnetRoot)
                 .Set("STEAM_COMPAT_CLIENT_INSTALL_PATH", steamDir)
-                .Set("STEAM_COMPAT_DATA_PATH", prefixDir))
+                .Set("STEAM_COMPAT_DATA_PATH", prefixDir));
+
+        var stdOutBuffer = new StringBuilder();
+        var stdErrBuffer = new StringBuilder();
+
+        // This can throw a CliWrap.Exceptions.CommandExecutionException
+        // However, I don't know what I would do aside from print it, so there's
+        // not much point in a try catch block.
+        var result = await handler
+            .WithStandardOutputPipe(PipeTarget.ToStringBuilder(stdOutBuffer))
+            .WithStandardErrorPipe(PipeTarget.ToStringBuilder(stdErrBuffer))
             .ExecuteAsync();
-        logger.LogInformation("Exit Code: {code}", result.ExitCode);
+        logger.LogInformation("Exit Code: {code}\nStdOut: {stdout}\nStdErr: {stderr}", result.ExitCode, stdOutBuffer.ToString(), stdErrBuffer.ToString());
     }
 }
